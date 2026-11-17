@@ -1,0 +1,7 @@
+## Interface: 16001
+## Title: Mail Bank
+## Notes: Window next to the mailbox with every item from all mails in the inbox. Left click takes one stack, right click takes all of that item.
+## Version: 1.0
+## SavedVariables: MailBankDB
+
+MailBank.lua
