@@ -47,6 +47,7 @@ Open a mailbox. The Mail Bank window opens next to it. The **Mail Bank** tab und
 - **Left click:** take that stack.
 - **Right click:** take every stack of that item, one after another. It stops when the bags are full.
 - **Shift + click:** link the item in chat.
+- `/mailbank` opens the window anywhere. Away from a mailbox it shows your inbox as it was when you last opened a mailbox (view only); there the window can be dragged and Escape closes it. With [Baganator](https://www.curseforge.com/wow/addons/baganator) there is also a Mail Bank button at the top of the bag window. Choosing a character in Baganator's All Characters list also switches the open Mail Bank window to that character.
 - `/mailbank size 42` sets the icon size (24 - 80, default 42).
 - `/mailbank forget` forgets the remembered inbox of the character chosen in the drop-down.
 

@@ -14,6 +14,9 @@
 -- OTHER CHARACTERS. Every time a character looks into its mailbox, the items are remembered.
 -- The drop-down in the window's header shows the remembered inbox of another character
 -- (view only - as it was when that character last opened its mailbox).
+-- AWAY FROM A MAILBOX. /mailbank (or the Mail Bank button in Baganator's bag window) opens the window
+-- anywhere; it then shows your inbox as it was when you last opened a mailbox (view only).
+-- There the window can be dragged (the place is remembered) and Escape closes it.
 -- /mailbank forget    forgets the remembered inbox of the character chosen in the drop-down
 -- /mailbank size 42   sets the icon size (default 42, same as Baganator here)
 --
@@ -37,8 +40,9 @@ local buttons = {}
 local filter = ""
 local busy = 0       -- > 0: a take was sent to the server, waiting for the inbox to update
 local takeAll        -- itemID being taken stack after stack (right click), nil = none
-local charKey        -- "Name-Realm" of the character you are on
+local charKey        -- "Name Surname-Realm" of the character you are on (Forever: first names are not unique)
 local viewing        -- nil = your own inbox; "Name-Realm" = the remembered inbox of another character (view only)
+local atMailbox = false   -- the mailbox is open (only then can items be taken)
 local inboxLoaded = false -- the game has sent the inbox since the mailbox was opened (before that it may be empty)
 
 local function DaysText(days)
@@ -50,6 +54,44 @@ local function AgeText(seconds)
 	if seconds < 3600 then return math.max(1, math.floor(seconds / 60)) .. " min" end
 	if seconds < 86400 then return math.floor(seconds / 3600) .. " h" end
 	return math.floor(seconds / 86400) .. " d"
+end
+
+-- race, sex, class, faction and ruleset of the character you are on (remembered with its inbox, for the drop-down)
+local function MyDetails()
+	local ruleset
+	if C_GameRules and C_GameRules.IsGameRuleActive and Enum.GameRule then -- same as Baganator / Syndicator show it
+		local pvp = Enum.GameRule.PvPRuleset and C_GameRules.IsGameRuleActive(Enum.GameRule.PvPRuleset)
+		local rp = Enum.GameRule.RPRuleset and C_GameRules.IsGameRuleActive(Enum.GameRule.RPRuleset)
+		local hc = Enum.GameRule.HardcoreRuleset and C_GameRules.IsGameRuleActive(Enum.GameRule.HardcoreRuleset)
+		ruleset = (pvp and rp and "RPPvP") or (pvp and "PvP") or (rp and "RP") or (hc and "HC") or "PvE"
+	end
+	return { race = select(2, UnitRace("player")), sex = UnitSex("player"), class = select(2, UnitClass("player")),
+		faction = UnitFactionGroup("player"), ruleset = ruleset }
+end
+
+-- how a character is written in the drop-down: race icon and name in its class colour, without the realm.
+-- long = also the ruleset and the faction emblem (in the list)
+local RACE_ATLAS = { scourge = "undead", zandalaritroll = "zandalari", highmountaintauren = "highmountain",
+	lightforgeddraenei = "lightforged", earthendwarf = "earthen", harronir = "haranir" }
+local function CharLabel(name, long)
+	local d = (name == charKey) and MyDetails() or MailBankDB.chars[name] or {}
+	local text = name:match("^[^-]+") or name
+	local color = d.class and (CUSTOM_CLASS_COLORS or RAID_CLASS_COLORS)[d.class]
+	if color and color.colorStr then text = "|c" .. color.colorStr .. text .. "|r" end
+	if d.race then
+		local race = d.race:lower()
+		local sex = (d.sex == 3 and "female") or (d.sex == 2 and "male") or "unknown"
+		text = "|A:raceicon-" .. (RACE_ATLAS[race] or race) .. "-" .. sex .. ":13:13|a " .. text
+	end
+	if long then
+		if d.ruleset then text = text .. "  |cffbfbfbf" .. d.ruleset .. "|r" end
+		if d.faction == "Horde" then
+			text = text .. " |A:charcreatetest-logo-horde:16:14|a"
+		elseif d.faction == "Alliance" then
+			text = text .. " |A:charcreatetest-logo-alliance:16:14|a"
+		end
+	end
+	return text
 end
 
 local function MoneyText(copper)
@@ -85,7 +127,7 @@ end
 -- header: whose inbox is shown (left) and the search box (right)
 local charDropDown = CreateFrame("Frame", "MailBankCharDropDown", window, "UIDropDownMenuTemplate")
 charDropDown:SetPoint("TOPLEFT", 48, -28)
-UIDropDownMenu_SetWidth(charDropDown, 110)
+UIDropDownMenu_SetWidth(charDropDown, 130)
 
 local search = CreateFrame("EditBox", "MailBankSearch", window, "SearchBoxTemplate")
 search:SetSize(150, 20)
@@ -120,12 +162,38 @@ local function Layout(cols, rows, rowsShown)
 	if not scrolling then scroll:SetVerticalScroll(0) end
 end
 
--- sits right of the mailbox, or right of the opened letter when one is open
+-- sits right of the mailbox, or right of the opened letter when one is open.
+-- Away from a mailbox it floats: it can be dragged, the place is remembered, Escape closes it.
 local function Anchor()
 	window:ClearAllPoints()
+	tDeleteItem(UISpecialFrames, "MailBankWindow") -- at the mailbox Escape closes the mailbox, and this window with it
+	if not atMailbox then
+		table.insert(UISpecialFrames, "MailBankWindow")
+		local pos = MailBankDB.pos
+		if pos then
+			window:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
+		else
+			window:SetPoint("CENTER", UIParent, "CENTER", 0, 50)
+		end
+		return
+	end
 	local left = (OpenMailFrame and OpenMailFrame:IsShown()) and OpenMailFrame or MailFrame
 	window:SetPoint("TOPLEFT", left, "TOPRIGHT", 12, 0)
 end
+
+window:SetMovable(true)
+window:SetClampedToScreen(true)
+window:RegisterForDrag("LeftButton")
+window:SetScript("OnDragStart", function(self)
+	if not atMailbox then self:StartMoving() end
+end)
+window:SetScript("OnDragStop", function(self)
+	self:StopMovingOrSizing()
+	self:SetUserPlaced(false) -- the place is kept here, not by the game (so it still snaps to the mailbox)
+	if atMailbox then return end
+	local point, _, relPoint, x, y = self:GetPoint()
+	MailBankDB.pos = { point, relPoint, x, y }
+end)
 
 ---------------------------------------------------------------------------
 -- READING THE INBOX
@@ -136,8 +204,8 @@ end
 local function Scan()
 	wipe(slots)
 	totalMoney = 0
-	if viewing then
-		local saved = MailBankDB.chars[viewing]
+	if viewing or not atMailbox then
+		local saved = MailBankDB.chars[viewing or charKey]
 		local age = saved and (time() - saved.time) / 86400 or 0 -- days since it was remembered
 		for i, item in ipairs(saved and saved.items or {}) do
 			local slot = {}
@@ -177,7 +245,9 @@ local function Scan()
 				count = slot.count, quality = slot.quality, sender = slot.sender, daysLeft = slot.daysLeft,
 				wasReturned = slot.wasReturned, cod = slot.cod, isGM = slot.isGM, sig = slot.sig }
 		end
-		MailBankDB.chars[charKey] = { time = time(), money = totalMoney, items = items }
+		local saved = MyDetails()
+		saved.time, saved.money, saved.items = time(), totalMoney, items
+		MailBankDB.chars[charKey] = saved
 	end
 end
 
@@ -355,7 +425,11 @@ local function OnClick(self, mouseButton)
 		return
 	end
 	if slot.saved then
-		UIErrorsFrame:AddMessage("This is the remembered inbox of " .. (viewing or "another character") .. ": log in with it to take this.", 1, 0.5, 0.25)
+		if viewing then
+			UIErrorsFrame:AddMessage("This is the remembered inbox of " .. viewing .. ": log in with it to take this.", 1, 0.5, 0.25)
+		else
+			UIErrorsFrame:AddMessage("Open a mailbox to take this.", 1, 0.5, 0.25)
+		end
 		return
 	end
 	if slot.isGM then
@@ -477,9 +551,11 @@ function Refresh()
 	end
 
 	countText:SetText((filter == "") and (n .. " items") or (matching .. " / " .. n .. " items"))
-	local saved = viewing and MailBankDB.chars[viewing]
+	local saved = (viewing or not atMailbox) and MailBankDB.chars[viewing or charKey]
 	if saved then
 		statusText:SetText("as of " .. AgeText(time() - saved.time) .. " ago, view only")
+	elseif viewing then
+		statusText:SetText("not remembered yet - open a mailbox with this character")
 	else
 		statusText:SetText(takeAll and "Taking..." or "")
 	end
@@ -502,7 +578,7 @@ end)
 local function View(name)
 	viewing = (name ~= charKey) and name or nil
 	takeAll = nil
-	UIDropDownMenu_SetText(charDropDown, name)
+	UIDropDownMenu_SetText(charDropDown, CharLabel(name))
 	Scan()
 	Arrange()
 	Refresh()
@@ -519,7 +595,7 @@ UIDropDownMenu_Initialize(charDropDown, function()
 	for _, name in ipairs(names) do
 		local info = UIDropDownMenu_CreateInfo()
 		local saved = MailBankDB.chars[name]
-		info.text = name .. (name == charKey and "  (this one)" or ("  |cff808080" .. #saved.items .. "|r"))
+		info.text = CharLabel(name, true) .. (name == charKey and "  (this one)" or ("  |cff808080" .. #saved.items .. " items|r"))
 		info.checked = (name == (viewing or charKey))
 		info.func = function() View(name) end
 		UIDropDownMenu_AddButton(info)
@@ -529,7 +605,7 @@ end)
 window:SetScript("OnShow", function()
 	Anchor()
 	viewing = nil -- always starts on your own inbox
-	UIDropDownMenu_SetText(charDropDown, charKey or "")
+	UIDropDownMenu_SetText(charDropDown, charKey and CharLabel(charKey) or "")
 	Scan()
 	Arrange() -- opening the window puts the items in order
 	Refresh()
@@ -537,6 +613,51 @@ end)
 window:SetScript("OnHide", function()
 	takeAll = nil
 end)
+
+-- shows / hides the window (the tab, the Baganator button and /mailbank)
+local function Toggle()
+	local open = not window:IsShown()
+	if atMailbox then MailBankDB.closed = not open end -- remembered only at the mailbox
+	window:SetShown(open)
+	PlaySound(SOUNDKIT.IG_CHARACTER_INFO_TAB)
+end
+
+---------------------------------------------------------------------------
+-- BUTTON IN BAGANATOR'S BAG WINDOW (only when Baganator is installed)
+---------------------------------------------------------------------------
+local bagButton
+local function MakeBaganatorButton()
+	if bagButton or not (Baganator and Baganator.API and Baganator.API.RegisterRegion) then return end
+	-- same template as Baganator's own buttons at the top of the bag window
+	bagButton = CreateFrame("Button", "MailBankBaganatorButton", UIParent, "BaganatorTooltipIconButtonTemplate")
+	bagButton.tooltipHeader = "Mail Bank"
+	bagButton.tooltipText = "Items in your mailbox"
+	bagButton.Icon = bagButton:CreateTexture(nil, "ARTWORK")
+	bagButton.Icon:SetSize(18, 18)
+	bagButton.Icon:SetPoint("CENTER")
+	bagButton.Icon:SetTexture("Interface\\Minimap\\Tracking\\Mailbox") -- the envelope of the minimap's mailbox tracking
+	bagButton:SetScript("OnClick", Toggle)
+	-- Baganator moves the button into its window; keep it above the window's border like its own buttons
+	hooksecurefunc(bagButton, "SetParent", function(self) self:SetFrameLevel(700) end)
+	if Baganator.Skins and Baganator.Skins.AddFrame then
+		Baganator.Skins.AddFrame("IconButton", bagButton, { "mailBank" }) -- follows Baganator's skin
+	end
+	-- "top_left" = right after Baganator's buttons at the top left
+	Baganator.API.RegisterRegion("Mail Bank", "MailBank", "backpack", "top_left", bagButton)
+	-- choosing a character in Baganator's "All Characters" list shows that character's inbox here too (only while open)
+	if Baganator.CallbackRegistry then
+		Baganator.CallbackRegistry:RegisterCallback("CharacterSelect", function(_, character)
+			if not window:IsShown() or type(character) ~= "string" then return end
+			local who = character:match("^[^-]+") -- "Name Surname", without the realm (Baganator writes it differently)
+			if who == charKey:match("^[^-]+") then View(charKey) return end
+			for name in pairs(MailBankDB.chars) do
+				if name:match("^[^-]+") == who then View(name) return end
+			end
+			View(who .. "-" .. GetRealmName()) -- not remembered: shows an empty inbox with a note
+		end, window)
+	end
+	if Baganator.API.RequestLayoutUpdate then Baganator.API.RequestLayoutUpdate() end
+end
 
 ---------------------------------------------------------------------------
 -- TAB UNDER THE MAILBOX (shows / hides the window)
@@ -551,13 +672,11 @@ local function MakeTab()
 	tab:SetText("Mail Bank")
 	if PanelTemplates_TabResize then PanelTemplates_TabResize(tab, 0) end
 	if PanelTemplates_DeselectTab then PanelTemplates_DeselectTab(tab) end -- normal (not selected) look
-	tab:SetScript("OnClick", function()
-		local open = not window:IsShown()
-		MailBankDB.closed = not open
-		window:SetShown(open)
-		PlaySound(SOUNDKIT.IG_CHARACTER_INFO_TAB)
+	tab:SetScript("OnClick", Toggle)
+	MailFrame:HookScript("OnHide", function()
+		atMailbox = false -- the game does not always send MAIL_CLOSED when the mailbox closes
+		window:Hide()
 	end)
-	MailFrame:HookScript("OnHide", function() window:Hide() end)
 	if OpenMailFrame then
 		OpenMailFrame:HookScript("OnShow", Anchor)
 		OpenMailFrame:HookScript("OnHide", Anchor)
@@ -579,8 +698,14 @@ events:SetScript("OnEvent", function(self, event, arg1)
 		if arg1 == "MailBank" then
 			MailBankDB = MailBankDB or {}
 			MailBankDB.chars = MailBankDB.chars or {} -- "Name-Realm" -> { time, money, items } as last seen in its mailbox
-			charKey = UnitName("player") .. "-" .. GetRealmName()
+			local name, surname = UnitName("player")
+			local sep = Constants and Constants.CharacterNameSeparatorConsts and Constants.CharacterNameSeparatorConsts.CHARACTERNAME_SURNAME_SEPARATOR or " "
+			charKey = ((surname and surname ~= "") and (name .. sep .. surname) or name) .. "-" .. GetRealmName()
+			-- older versions remembered the inbox under the first name only; drop that (saved again at the next mailbox)
+			local old = name .. "-" .. GetRealmName()
+			if old ~= charKey then MailBankDB.chars[old] = nil end
 			SIZE = MailBankDB.size or DEFAULT_SIZE
+			MakeBaganatorButton() -- Baganator is loaded before this addon (OptionalDeps in the .toc)
 		end
 		MakeTab() -- the mailbox may load before or after this addon
 		return
@@ -589,8 +714,11 @@ events:SetScript("OnEvent", function(self, event, arg1)
 		MakeTab()
 		busy, takeAll = 0, nil
 		inboxLoaded = false
+		atMailbox = true
+		window:Hide() -- if it was open away from the mailbox: open it again next to the mailbox
 		if not MailBankDB.closed then window:Show() end
 	elseif event == "MAIL_CLOSED" then
+		atMailbox = false
 		window:Hide()
 	elseif event == "MAIL_INBOX_UPDATE" then
 		busy = 0
@@ -600,7 +728,7 @@ events:SetScript("OnEvent", function(self, event, arg1)
 		viewing = nil
 		Scan()
 		viewing = other
-		if not window:IsShown() then return end
+		if not window:IsShown() or not atMailbox then return end
 		if viewing then Scan() end
 		Sync()
 		Refresh()
@@ -624,6 +752,17 @@ SlashCmdList.MAILBANK = function(msg)
 		end
 		return
 	end
+	if (msg or ""):match("^%s*bag") then
+		-- for finding out why the button in Baganator's bag window cannot be seen
+		if not bagButton then
+			print("Mail Bank: no Baganator button (Baganator " .. ((Baganator and Baganator.API and Baganator.API.RegisterRegion) and "found" or "NOT found") .. ")")
+		else
+			local parent = bagButton:GetParent()
+			print("Mail Bank: Baganator button - in " .. tostring(parent and parent:GetName()) .. ", shown " .. tostring(bagButton:IsVisible())
+				.. ", level " .. bagButton:GetFrameLevel() .. ", width " .. math.floor(bagButton:GetWidth()) .. ", placed " .. tostring(bagButton:GetNumPoints() > 0))
+		end
+		return
+	end
 	if (msg or ""):match("^%s*forget") then
 		if viewing then
 			local name = viewing
@@ -635,6 +774,10 @@ SlashCmdList.MAILBANK = function(msg)
 		end
 		return
 	end
+	if strtrim(msg or "") == "" then
+		Toggle()
+		return
+	end
 	local size = tonumber((msg or ""):match("^%s*size%s+(%d+)"))
 	if size and size >= 24 and size <= 80 then
 		SIZE = size
@@ -642,6 +785,7 @@ SlashCmdList.MAILBANK = function(msg)
 		if window:IsShown() then Anchor() Refresh() end
 		print("Mail Bank: icon size " .. size)
 	else
+		print("Mail Bank: /mailbank   opens / closes the window (away from a mailbox: view only)")
 		print("Mail Bank: /mailbank size N   (24-80, now " .. SIZE .. ", default " .. DEFAULT_SIZE .. ")")
 		print("Mail Bank: /mailbank forget   forgets the remembered inbox of the character chosen in the drop-down")
 	end
