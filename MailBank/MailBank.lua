@@ -11,6 +11,10 @@
 -- then it scrolls.
 -- While the window is open the items keep their places: a taken item leaves an empty place.
 -- They are put in order again the next time the window opens.
+-- OTHER CHARACTERS. Every time a character looks into its mailbox, the items are remembered.
+-- The drop-down in the window's header shows the remembered inbox of another character
+-- (view only - as it was when that character last opened its mailbox).
+-- /mailbank forget    forgets the remembered inbox of the character chosen in the drop-down
 -- /mailbank size 42   sets the icon size (default 42, same as Baganator here)
 --
 -- The expiry marks, the sender in the tooltip, the money total and the grey C.O.D. / GM items
@@ -33,10 +37,19 @@ local buttons = {}
 local filter = ""
 local busy = 0       -- > 0: a take was sent to the server, waiting for the inbox to update
 local takeAll        -- itemID being taken stack after stack (right click), nil = none
+local charKey        -- "Name-Realm" of the character you are on
+local viewing        -- nil = your own inbox; "Name-Realm" = the remembered inbox of another character (view only)
+local inboxLoaded = false -- the game has sent the inbox since the mailbox was opened (before that it may be empty)
 
 local function DaysText(days)
 	if days >= 1 then return math.floor(days) .. "d" end
 	return math.max(1, math.floor(days * 24)) .. "h"
+end
+
+local function AgeText(seconds)
+	if seconds < 3600 then return math.max(1, math.floor(seconds / 60)) .. " min" end
+	if seconds < 86400 then return math.floor(seconds / 3600) .. " h" end
+	return math.floor(seconds / 86400) .. " d"
 end
 
 local function MoneyText(copper)
@@ -69,19 +82,23 @@ if window.Inset then
 	window.Inset:SetPoint("BOTTOMRIGHT", -6, 26)
 end
 
-local countText = window:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-countText:SetPoint("TOPLEFT", 70, -38)
+-- header: whose inbox is shown (left) and the search box (right)
+local charDropDown = CreateFrame("Frame", "MailBankCharDropDown", window, "UIDropDownMenuTemplate")
+charDropDown:SetPoint("TOPLEFT", 48, -28)
+UIDropDownMenu_SetWidth(charDropDown, 110)
 
 local search = CreateFrame("EditBox", "MailBankSearch", window, "SearchBoxTemplate")
 search:SetSize(150, 20)
 search:SetPoint("TOPRIGHT", -14, -34)
 search:SetAutoFocus(false)
 
--- bottom line: what is going on (left) and the money in the inbox (right)
+-- bottom line: number of items and what is going on (left), the money in the inbox (right)
 local moneyText = window:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
 moneyText:SetPoint("BOTTOMRIGHT", -14, 8)
+local countText = window:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+countText:SetPoint("BOTTOMLEFT", 14, 8)
 local statusText = window:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-statusText:SetPoint("BOTTOMLEFT", 14, 9)
+statusText:SetPoint("LEFT", countText, "RIGHT", 10, 0)
 
 local scroll = CreateFrame("ScrollFrame", "MailBankScroll", window, "UIPanelScrollFrameTemplate")
 local content = CreateFrame("Frame", nil, scroll)
@@ -92,8 +109,8 @@ local function Layout(cols, rows, rowsShown)
 	local scrolling = rows > rowsShown
 	local gridW, gridH = cols * (SIZE + GAP) - GAP, rowsShown * (SIZE + GAP) - GAP
 	local right = scrolling and 32 or 14 -- room for the scroll bar
-	-- at least wide enough for the item count and the search box in the header
-	window:SetSize(math.max(360, 14 + gridW + right), 68 + gridH + 34)
+	-- at least wide enough for the character drop-down and the search box in the header
+	window:SetSize(math.max(392, 14 + gridW + right), 68 + gridH + 34)
 	scroll:ClearAllPoints()
 	scroll:SetPoint("TOPLEFT", 14, -68)
 	scroll:SetPoint("BOTTOMRIGHT", -right, 34)
@@ -115,9 +132,23 @@ end
 ---------------------------------------------------------------------------
 -- slots[n] = { mail, attach, itemID, name, link, texture, count, quality,
 --              sender, daysLeft, wasReturned, cod (copper, nil = none), isGM }
+-- While another character is chosen in the drop-down, its remembered items are put there instead.
 local function Scan()
 	wipe(slots)
 	totalMoney = 0
+	if viewing then
+		local saved = MailBankDB.chars[viewing]
+		local age = saved and (time() - saved.time) / 86400 or 0 -- days since it was remembered
+		for i, item in ipairs(saved and saved.items or {}) do
+			local slot = {}
+			for k, v in pairs(item) do slot[k] = v end
+			slot.saved = true -- cannot be taken
+			slot.daysLeft = math.max(0, (item.daysLeft or 0) - age)
+			slots[i] = slot
+		end
+		totalMoney = saved and saved.money or 0
+		return
+	end
 	for mail = 1, GetInboxNumItems() do
 		local _, _, sender, _, money, cod, daysLeft, itemCount, _, wasReturned, _, _, isGM = GetInboxHeaderInfo(mail)
 		local isCOD = cod and cod > 0
@@ -138,9 +169,66 @@ local function Scan()
 			end
 		end
 	end
+	-- remember it, so that other characters can look at it
+	if inboxLoaded and charKey and MailBankDB then
+		local items = {}
+		for i, slot in ipairs(slots) do
+			items[i] = { itemID = slot.itemID, name = slot.name, link = slot.link, texture = slot.texture,
+				count = slot.count, quality = slot.quality, sender = slot.sender, daysLeft = slot.daysLeft,
+				wasReturned = slot.wasReturned, cod = slot.cod, isGM = slot.isGM, sig = slot.sig }
+		end
+		MailBankDB.chars[charKey] = { time = time(), money = totalMoney, items = items }
+	end
 end
 
 local Refresh -- defined below
+
+-- SEARCH. Everything that can be searched about an item, in lower case: its name, its type
+-- (Trade Goods, Cloth, Head...) and the whole text of its tooltip ("Crafting Reagent", "Use: ...").
+-- Remembered per item, so the tooltip is read only once.
+local searchText = {}
+local function SearchText(slot)
+	local key = slot.link or slot.name
+	if searchText[key] then return searchText[key] end
+	local parts, complete = { slot.name }, true
+	if slot.link and C_Item and C_Item.GetItemInfo then
+		local _, _, _, _, _, itemType, itemSubType, _, equipLoc = C_Item.GetItemInfo(slot.link)
+		if itemType then
+			parts[#parts + 1] = itemType
+			parts[#parts + 1] = itemSubType or ""
+			local where = equipLoc and equipLoc ~= "" and _G[equipLoc] -- "Head", "Two-Hand"...
+			if type(where) == "string" then parts[#parts + 1] = where end
+		else
+			complete = false -- the game has not loaded this item yet; try again next time
+		end
+	end
+	if slot.link and C_TooltipInfo and C_TooltipInfo.GetHyperlink then
+		local ok, data = pcall(C_TooltipInfo.GetHyperlink, slot.link)
+		if ok and data and data.lines then
+			for _, line in ipairs(data.lines) do
+				if type(line.leftText) == "string" then parts[#parts + 1] = line.leftText end
+				if type(line.rightText) == "string" then parts[#parts + 1] = line.rightText end
+			end
+		else
+			complete = false
+		end
+	end
+	-- without colour codes
+	local text = table.concat(parts, "\n"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):lower()
+	if complete then searchText[key] = text end
+	return text
+end
+
+-- every word typed in the search box must be somewhere in the item's text
+local filterWords = {}
+local function Matches(slot)
+	if filter == "" then return true end
+	local text = SearchText(slot)
+	for _, word in ipairs(filterWords) do
+		if not text:find(word, 1, true) then return false end
+	end
+	return true
+end
 
 -- Puts the grid in order from scratch: the items one after another, no empty places between them.
 -- Done when the window opens (and when the inbox changed in a way Sync below cannot follow).
@@ -266,6 +354,10 @@ local function OnClick(self, mouseButton)
 		HandleModifiedItemClick(slot.link)
 		return
 	end
+	if slot.saved then
+		UIErrorsFrame:AddMessage("This is the remembered inbox of " .. (viewing or "another character") .. ": log in with it to take this.", 1, 0.5, 0.25)
+		return
+	end
 	if slot.isGM then
 		UIErrorsFrame:AddMessage("GM mail: open it in the inbox to take this.", 1, 0.5, 0.25)
 		return
@@ -283,7 +375,13 @@ local function OnEnter(self)
 	local slot = self.slot
 	if not slot then return end
 	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-	GameTooltip:SetInboxItem(slot.mail, slot.attach)
+	if not slot.saved then
+		GameTooltip:SetInboxItem(slot.mail, slot.attach)
+	elseif slot.link then
+		GameTooltip:SetHyperlink(slot.link)
+	else
+		GameTooltip:SetText(slot.name)
+	end
 	GameTooltip:AddLine(" ")
 	if slot.sender then GameTooltip:AddDoubleLine("From", slot.sender, 0.6, 0.6, 0.6, 1, 1, 1) end
 	local r, g, b = 1, 1, 1
@@ -294,6 +392,8 @@ local function OnEnter(self)
 	elseif slot.cod then
 		GameTooltip:AddLine("Cash on delivery: " .. MoneyText(slot.cod), 1, 0.5, 0.25)
 		GameTooltip:AddLine("Open the mail in the inbox to pay and take it.", 1, 0.5, 0.25, true)
+	elseif slot.saved then
+		GameTooltip:AddLine("Remembered inbox: log in with this character to take it.", 0.6, 0.6, 0.6, true)
 	else
 		GameTooltip:AddLine("Left click: take   Right click: take all of these", 0.6, 0.6, 0.6)
 	end
@@ -348,7 +448,7 @@ function Refresh()
 		b:SetPoint("TOPLEFT", col * (SIZE + GAP), -row * (SIZE + GAP))
 		b.slot = slot
 		if slot then
-			local matches = filter == "" or slot.name:lower():find(filter, 1, true) ~= nil
+			local matches = Matches(slot)
 			if matches then matching = matching + 1 end
 			SetItemButtonTexture(b, slot.texture)
 			SetItemButtonCount(b, slot.count)
@@ -377,7 +477,12 @@ function Refresh()
 	end
 
 	countText:SetText((filter == "") and (n .. " items") or (matching .. " / " .. n .. " items"))
-	statusText:SetText(takeAll and "Taking..." or "")
+	local saved = viewing and MailBankDB.chars[viewing]
+	if saved then
+		statusText:SetText("as of " .. AgeText(time() - saved.time) .. " ago, view only")
+	else
+		statusText:SetText(takeAll and "Taking..." or "")
+	end
 	moneyText:SetText(totalMoney > 0 and MoneyText(totalMoney) or "")
 
 	if GameTooltip:IsShown() then
@@ -388,11 +493,43 @@ end
 
 search:HookScript("OnTextChanged", function(self)
 	filter = strtrim(self:GetText() or ""):lower()
+	wipe(filterWords)
+	for word in filter:gmatch("%S+") do filterWords[#filterWords + 1] = word end
 	Refresh()
+end)
+
+-- shows the inbox of the chosen character: your own (live) or a remembered one
+local function View(name)
+	viewing = (name ~= charKey) and name or nil
+	takeAll = nil
+	UIDropDownMenu_SetText(charDropDown, name)
+	Scan()
+	Arrange()
+	Refresh()
+end
+
+UIDropDownMenu_Initialize(charDropDown, function()
+	if not MailBankDB or not charKey then return end -- the game calls this once right away, before our settings are loaded
+	local names = {}
+	for name in pairs(MailBankDB.chars) do
+		if name ~= charKey then names[#names + 1] = name end
+	end
+	table.sort(names)
+	table.insert(names, 1, charKey)
+	for _, name in ipairs(names) do
+		local info = UIDropDownMenu_CreateInfo()
+		local saved = MailBankDB.chars[name]
+		info.text = name .. (name == charKey and "  (this one)" or ("  |cff808080" .. #saved.items .. "|r"))
+		info.checked = (name == (viewing or charKey))
+		info.func = function() View(name) end
+		UIDropDownMenu_AddButton(info)
+	end
 end)
 
 window:SetScript("OnShow", function()
 	Anchor()
+	viewing = nil -- always starts on your own inbox
+	UIDropDownMenu_SetText(charDropDown, charKey or "")
 	Scan()
 	Arrange() -- opening the window puts the items in order
 	Refresh()
@@ -441,6 +578,8 @@ events:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
 		if arg1 == "MailBank" then
 			MailBankDB = MailBankDB or {}
+			MailBankDB.chars = MailBankDB.chars or {} -- "Name-Realm" -> { time, money, items } as last seen in its mailbox
+			charKey = UnitName("player") .. "-" .. GetRealmName()
 			SIZE = MailBankDB.size or DEFAULT_SIZE
 		end
 		MakeTab() -- the mailbox may load before or after this addon
@@ -449,13 +588,20 @@ events:SetScript("OnEvent", function(self, event, arg1)
 	if event == "MAIL_SHOW" then
 		MakeTab()
 		busy, takeAll = 0, nil
+		inboxLoaded = false
 		if not MailBankDB.closed then window:Show() end
 	elseif event == "MAIL_CLOSED" then
 		window:Hide()
 	elseif event == "MAIL_INBOX_UPDATE" then
 		busy = 0
-		if not window:IsShown() then return end
+		inboxLoaded = true
+		-- read your own inbox (this also remembers it), even when the window is closed or shows another character
+		local other = viewing
+		viewing = nil
 		Scan()
+		viewing = other
+		if not window:IsShown() then return end
+		if viewing then Scan() end
 		Sync()
 		Refresh()
 		if takeAll then C_Timer.After(0.2, ContinueTakeAll) end
@@ -470,6 +616,25 @@ end)
 
 SLASH_MAILBANK1 = "/mailbank"
 SlashCmdList.MAILBANK = function(msg)
+	if (msg or ""):match("^%s*text") then
+		-- for finding out why the search does not find something: what is searched in for each item
+		print("Mail Bank: tooltip reading " .. ((C_TooltipInfo and C_TooltipInfo.GetHyperlink) and "available" or "NOT available in this client"))
+		for i = 1, math.min(#slots, 3) do
+			print(i .. ": " .. SearchText(slots[i]):gsub("\n", " / "))
+		end
+		return
+	end
+	if (msg or ""):match("^%s*forget") then
+		if viewing then
+			local name = viewing
+			MailBankDB.chars[name] = nil
+			View(charKey)
+			print("Mail Bank: forgot the remembered inbox of " .. name)
+		else
+			print("Mail Bank: first choose another character in the window's drop-down.")
+		end
+		return
+	end
 	local size = tonumber((msg or ""):match("^%s*size%s+(%d+)"))
 	if size and size >= 24 and size <= 80 then
 		SIZE = size
@@ -478,5 +643,6 @@ SlashCmdList.MAILBANK = function(msg)
 		print("Mail Bank: icon size " .. size)
 	else
 		print("Mail Bank: /mailbank size N   (24-80, now " .. SIZE .. ", default " .. DEFAULT_SIZE .. ")")
+		print("Mail Bank: /mailbank forget   forgets the remembered inbox of the character chosen in the drop-down")
 	end
 end

@@ -21,10 +21,11 @@ Mail Bank is a World of Warcraft addon for the Forever client. It opens a window
 - Shows every item from all mails in the inbox in one grid, next to the mailbox.
 - Takes one stack with a left click, and every stack of the same item with a right click.
 - Keeps the items in their places while you take them: a taken item leaves an empty place. The items are put in order again the next time the window opens.
-- Has a search box. Items that do not match are dimmed and stay where they are.
+- Has a search box that looks in the item's name, its type and the whole text of its tooltip (for example `crafting reagent`, `cloth` or `use:`). Every word typed must be found. Items that do not match are dimmed and stay where they are.
 - Marks items from mails that expire soon: a red frame under 10 days, a countdown under 3 days.
 - Shows the sender and the time left in the tooltip.
 - Shows the total of the money in the inbox.
+- Remembers the inbox of every character that opens its mailbox. A drop-down in the window shows the remembered inbox of your other characters (view only, as it was when that character last looked).
 - Grows with the number of items: 8 wide and up to 12 rows, then wider (up to 16), then it scrolls.
 - Links an item in chat with Shift + click, like in bags.
 
@@ -47,6 +48,7 @@ Open a mailbox. The Mail Bank window opens next to it. The **Mail Bank** tab und
 - **Right click:** take every stack of that item, one after another. It stops when the bags are full.
 - **Shift + click:** link the item in chat.
 - `/mailbank size 42` sets the icon size (24 - 80, default 42).
+- `/mailbank forget` forgets the remembered inbox of the character chosen in the drop-down.
 
 ## Requirements
 
