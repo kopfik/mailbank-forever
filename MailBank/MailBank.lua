@@ -650,8 +650,8 @@ local function MakeBaganatorButton()
 	if Baganator.Skins and Baganator.Skins.AddFrame then
 		Baganator.Skins.AddFrame("IconButton", bagButton, { "mailBank" }) -- follows Baganator's skin
 	end
-	-- "top_left" = right after Baganator's buttons at the top left
-	Baganator.API.RegisterRegion("Mail Bank", "MailBank", "backpack", "top_left", bagButton)
+	-- "bottom_left" = the row of buttons at the bottom left (Baganator 864 no longer shows "top_left" regions)
+	Baganator.API.RegisterRegion("Mail Bank", "MailBank", "backpack", "bottom_left", bagButton)
 	-- choosing a character in Baganator's "All Characters" list shows that character's inbox here too (only while open)
 	if Baganator.CallbackRegistry then
 		Baganator.CallbackRegistry:RegisterCallback("CharacterSelect", function(_, character)
