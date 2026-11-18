@@ -402,13 +402,21 @@ local function ContinueTakeAll()
 	end
 	Scan()
 	Sync()
+	-- take from the LAST mail first: a mail that is emptied gets deleted and the mails below it
+	-- move up, which would make the next take point at the wrong mail
+	local best
 	for i = 1, cellCount do
 		local slot = cells[i]
 		if slot and slot.itemID == takeAll and not slot.cod and not slot.isGM and not slot.taking then
-			Refresh()
-			Take(slot)
-			return
+			if not best or slot.mail > best.mail or (slot.mail == best.mail and slot.attach > best.attach) then
+				best = slot
+			end
 		end
+	end
+	if best then
+		Refresh()
+		Take(best)
+		return
 	end
 	takeAll = nil
 	Refresh()
